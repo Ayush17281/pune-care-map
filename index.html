@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pune Care Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.x/dist/maplibre-gl.css" />
+  <script src="https://unpkg.com/maplibre-gl@5.x/dist/maplibre-gl.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <!-- config.js holds API_KEY and REGION (kept out of this file on purpose) -->
+  <script src="config.js"></script>
+  <style>
+    body { margin: 0; font-family: system-ui, Segoe UI, Arial, sans-serif; }
+    #map { height: 100vh; }
+    #panel {
+      position: absolute; top: 10px; left: 10px; z-index: 5;
+      background: #fff; border-radius: 8px; padding: 12px 14px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.25); width: 270px; max-width: calc(100vw - 80px);
+      max-height: calc(100vh - 20px); overflow-y: auto; box-sizing: border-box;
+      font-size: 14px;
+    }
+    #panel h1 { font-size: 16px; margin: 0 0 8px; }
+    #search { width: 100%; box-sizing: border-box; padding: 7px 8px; border: 1px solid #bbb; border-radius: 6px; font-size: 14px; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
+    .swatch { width: 12px; height: 12px; border-radius: 50%; border: 1px solid #fff; box-shadow: 0 0 0 1px #888; flex: none; }
+    .row .n { margin-left: auto; color: #666; font-size: 12px; }
+    #count { margin-top: 8px; color: #444; font-size: 12px; }
+    .linkbtn { margin-top: 6px; background: none; border: none; color: #0b5ed7; cursor: pointer; padding: 0; font-size: 12px; }
+    hr { border: none; border-top: 1px solid #ddd; margin: 12px 0; }
+    #hint { font-size: 13px; color: #333; }
+    .result { border: 1px solid #ddd; border-left: 5px solid #0b5ed7; border-radius: 6px; padding: 6px 8px; margin: 6px 0; cursor: pointer; }
+    .result:hover { background: #f3f7ff; }
+    .result .nm { font-weight: 600; }
+    .result .meta { color: #555; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="panel">
+    <h1>Pune Care Map</h1>
+    <input id="search" type="search" placeholder="Search by name, press Enter to zoom" autocomplete="off">
+    <div id="types"></div>
+    <div id="count">Loading places...</div>
+    <button id="reset" class="linkbtn" type="button">Reset filters</button>
+    <hr>
+<div id="hint">
+  <b>Find the nearest:</b> <select id="findType"></select><br>
+  Then click anywhere on the map to get the 3 nearest by road.
+</div>
+    <div id="results"></div>
+  </div>
+
+  <script>
+    // One place for the type -> colour rules. Used by the dots AND the filter panel.
+    const TYPE_COLORS = {
+      "Hospital": "#d62728",
+      "Pharmacy": "#2ca02c",
+      "Dental": "#1f77b4",
+      "Lab / Diagnostics": "#9467bd",
+      "Specialist": "#ff7f0e",
+      "Clinic / Doctor": "#8c564b"
+    };
+
+    // Build the MapLibre colour rule from that list: ["match", ["get","type"], "Hospital","#d62728", ..., fallback]
+    const colorExpr = ["match", ["get", "type"]];
+    Object.entries(TYPE_COLORS).forEach(([t, c]) => colorExpr.push(t, c));
+    colorExpr.push("#999999");
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style: `https://maps.geo.${REGION}.amazonaws.com/v2/styles/Standard/descriptor?key=${API_KEY}&color-scheme=Light`,
+      center: [73.8567, 18.5204],
+      zoom: 11
+    });
+    map.addControl(new maplibregl.NavigationControl());
+
+    // ---- state ----
+    let allFeatures = [];
+    const activeTypes = new Set(Object.keys(TYPE_COLORS));
+    let searchText = "";
+    let youMarker = null;
+    let busy = false;
+
+    const searchEl = document.getElementById("search");
+    const typesEl = document.getElementById("types");
+    const countEl = document.getElementById("count");
+    const resultsEl = document.getElementById("results");
+const findTypeEl = document.getElementById("findType");
+Object.keys(TYPE_COLORS).forEach(t => {
+  const o = document.createElement("option");
+  o.value = t; o.textContent = t;
+  findTypeEl.appendChild(o);
+});
+findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clearRoutes(); });
+    // ================= Step 4: filters + search =================
+    // We update the SOURCE data (not just a layer filter) because clusters are counted from the source.
+    function applyFilters() {
+      const q = searchText.trim().toLowerCase();
+      const shown = allFeatures.filter(f =>
+        activeTypes.has(f.properties.type) &&
+        (q === "" || (f.properties.name || "").toLowerCase().includes(q))
+      );
+      map.getSource("places").setData({ type: "FeatureCollection", features: shown });
+      countEl.textContent = `Showing ${shown.length.toLocaleString()} of ${allFeatures.length.toLocaleString()} places`;
+      return shown;
+    }
+
+    const checkboxes = {};
+    function buildPanel() {
+      const counts = {};
+      allFeatures.forEach(f => { counts[f.properties.type] = (counts[f.properties.type] || 0) + 1; });
+
+      Object.entries(TYPE_COLORS).forEach(([type, color]) => {
+        const label = document.createElement("label");
+        label.className = "row";
+
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = true;
+        box.addEventListener("change", () => {
+          if (box.checked) activeTypes.add(type); else activeTypes.delete(type);
+          applyFilters();
+        });
+        checkboxes[type] = box;
+
+        const swatch = document.createElement("span");
+        swatch.className = "swatch";
+        swatch.style.background = color;
+
+        const name = document.createElement("span");
+        name.textContent = type;
+
+        const n = document.createElement("span");
+        n.className = "n";
+        n.textContent = (counts[type] || 0).toLocaleString();
+
+        label.append(box, swatch, name, n);
+        typesEl.appendChild(label);
+      });
+    }
+
+    searchEl.addEventListener("input", () => { searchText = searchEl.value; applyFilters(); });
+    searchEl.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      const shown = applyFilters();
+      if (searchText.trim() && shown.length > 0) {
+        const bounds = new maplibregl.LngLatBounds();
+        shown.forEach(f => bounds.extend(f.geometry.coordinates));
+        map.fitBounds(bounds, { padding: 80, maxZoom: 16 });
+      }
+    });
+
+    document.getElementById("reset").addEventListener("click", () => {
+      searchEl.value = ""; searchText = "";
+      Object.keys(TYPE_COLORS).forEach(t => { activeTypes.add(t); checkboxes[t].checked = true; });
+      applyFilters();
+    });
+
+    // ================= Step 5: nearest hospitals by road (AWS Routes) =================
+    // Straight-line distance in metres between two [lon, lat] points (haversine formula).
+    function haversine(a, b) {
+      const R = 6371000, rad = Math.PI / 180;
+      const dLat = (b[1] - a[1]) * rad, dLon = (b[0] - a[0]) * rad;
+      const h = Math.sin(dLat / 2) ** 2 +
+                Math.cos(a[1] * rad) * Math.cos(b[1] * rad) * Math.sin(dLon / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(h));
+    }
+
+    // Ask Amazon Location Service (Routes API) for a driving route between two points.
+    async function getRoute(from, to) {
+      const res = await fetch(`https://routes.geo.${REGION}.amazonaws.com/v2/routes?key=${API_KEY}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          Origin: from,
+          Destination: to,
+          TravelMode: "Car",
+          LegGeometryFormat: "Simple"      // simple [lon, lat] list, easy to draw
+        })
+      });
+      if (!res.ok) throw new Error("Routes API error " + res.status);
+      return res.json();
+    }
+
+    function lineLength(line) {
+      let m = 0;
+      for (let i = 1; i < line.length; i++) m += haversine(line[i - 1], line[i]);
+      return m;
+    }
+
+    function fmtDistance(m) { return m < 1000 ? Math.round(m) + " m" : (m / 1000).toFixed(1) + " km"; }
+    function fmtTime(s) { return s == null ? "" : Math.max(1, Math.round(s / 60)) + " min"; }
+
+    function clearRoutes() {
+      map.getSource("routes").setData({ type: "FeatureCollection", features: [] });
+      if (youMarker) { youMarker.remove(); youMarker = null; }
+      resultsEl.replaceChildren();
+    }
+
+    async function findNearest(lngLat) {
+      if (busy) return;                 // one search at a time (also protects your free credits)
+      busy = true;
+      try {
+        const here = [lngLat.lng, lngLat.lat];
+        clearRoutes();
+        youMarker = new maplibregl.Marker({ color: "#0b5ed7" }).setLngLat(here).addTo(map);
+        resultsEl.textContent = `Finding the nearest ${findTypeEl.value}...`;
+
+        // 1) cheap step on your laptop: pick the 3 closest hospitals in a straight line
+        const nearest = allFeatures
+          .filter(f => f.properties.type === findTypeEl.value)
+          .map(f => ({ f, straight: haversine(here, f.geometry.coordinates) }))
+          .sort((a, b) => a.straight - b.straight)
+          .slice(0, 3);
+
+        // 2) AWS step: get the real driving route to each of them
+        const items = await Promise.all(nearest.map(async (n) => {
+          const dest = n.f.geometry.coordinates;
+          try {
+            const data = await getRoute(here, dest);
+            const route = data.Routes[0];
+            const line = route.Legs.flatMap(l => l.Geometry.LineString);
+            const meters = (route.Summary && route.Summary.Distance != null) ? route.Summary.Distance : lineLength(line);
+            const seconds = route.Summary ? route.Summary.Duration : null;
+            return { name: n.f.properties.name, dest, line, meters, seconds, routed: true };
+          } catch (err) {
+            console.warn("Route failed:", err);
+            return { name: n.f.properties.name, dest, line: null, meters: n.straight, seconds: null, routed: false };
+          }
+        }));
+
+        items.sort((a, b) => a.meters - b.meters);
+        items.forEach((it, i) => { it.rank = i + 1; });
+
+        // draw the route lines
+        map.getSource("routes").setData({
+          type: "FeatureCollection",
+          features: items.filter(it => it.line).map(it => ({
+            type: "Feature",
+            properties: { rank: it.rank },
+            geometry: { type: "LineString", coordinates: it.line }
+          }))
+        });
+
+        showResults(items, here);
+      } catch (err) {
+        console.error(err);
+        resultsEl.textContent = "Sorry, something went wrong. Please try again.";
+      } finally {
+        busy = false;
+      }
+    }
+
+    function showResults(items, here) {
+      resultsEl.replaceChildren();
+
+      items.forEach(it => {
+        const card = document.createElement("div");
+        card.className = "result";
+
+        const nm = document.createElement("div");
+        nm.className = "nm";
+        nm.textContent = `${it.rank}. ${it.name}`;      // textContent: names are never treated as HTML
+
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = it.routed
+          ? `${fmtDistance(it.meters)} by road${it.seconds != null ? " · about " + fmtTime(it.seconds) : ""}`
+          : `${fmtDistance(it.meters)} in a straight line (no road route found)`;
+
+        card.append(nm, meta);
+        card.addEventListener("click", () => {
+          const bounds = new maplibregl.LngLatBounds(here, here);
+          (it.line || [it.dest]).forEach(p => bounds.extend(p));
+          bounds.extend(it.dest);
+          map.fitBounds(bounds, { padding: { top: 80, bottom: 80, left: 340, right: 80 }, maxZoom: 16 });
+        });
+        resultsEl.appendChild(card);
+      });
+
+      const clear = document.createElement("button");
+      clear.className = "linkbtn";
+      clear.type = "button";
+      clear.textContent = "Clear routes";
+      clear.addEventListener("click", clearRoutes);
+      resultsEl.appendChild(clear);
+    }
+
+    // ================= map setup =================
+    map.on("load", async () => {
+      // ---- Step 1: load the CSV and turn each row into a GeoJSON point ----
+      const response = await fetch("pune_health_clean.csv");
+      const text = await response.text();
+      const rows = Papa.parse(text, { header: true, skipEmptyLines: true }).data;
+
+      allFeatures = rows.map(r => ({
+        type: "Feature",
+        properties: { name: r.name, type: r.type },
+        geometry: { type: "Point", coordinates: [Number(r.lon), Number(r.lat)] }
+      }));
+      console.log("places loaded:", allFeatures.length);
+
+      // ---- Step 2: source (the data) ----
+      map.addSource("places", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: allFeatures },
+        cluster: true, clusterMaxZoom: 14, clusterRadius: 55
+      });
+
+      // ---- Step 2: single dots, coloured by type ----
+      map.addLayer({
+        id: "places-dots",
+        type: "circle",
+        source: "places",
+        filter: ["!", ["has", "point_count"]],
+        paint: {
+          "circle-radius": 5,
+          "circle-stroke-width": 1,
+          "circle-stroke-color": "#ffffff",
+          "circle-color": colorExpr
+        }
+      });
+
+      // ---- Step 5: route lines (drawn UNDER the dots so dots stay clickable) ----
+      map.addSource("routes", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addLayer({
+        id: "route-lines",
+        type: "line",
+        source: "routes",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: {
+          "line-color": ["match", ["get", "rank"], 1, "#0b5ed7", 2, "#5b8def", "#9db8f2"],
+          "line-width": ["match", ["get", "rank"], 1, 6, 2, 4, 3]
+        }
+      }, "places-dots");
+
+      // ---- Step 3: cluster circles ----
+      map.addLayer({
+        id: "clusters",
+        type: "circle",
+        source: "places",
+        filter: ["has", "point_count"],
+        paint: {
+          "circle-color": ["step", ["get", "point_count"], "#51bbd6", 100, "#f1f075", 750, "#f28cb1"],
+          "circle-radius": ["step", ["get", "point_count"], 16, 100, 22, 750, 30],
+          "circle-stroke-width": 2,
+          "circle-stroke-color": "#ffffff"
+        }
+      });
+
+      const fontLayer = map.getStyle().layers.find(l =>
+        l.layout && Array.isArray(l.layout["text-font"]) &&
+        typeof l.layout["text-font"][0] === "string" && l.layout["text-font"][0] !== "literal");
+
+      map.addLayer({
+        id: "cluster-count",
+        type: "symbol",
+        source: "places",
+        filter: ["has", "point_count"],
+        layout: {
+          "text-field": ["get", "point_count_abbreviated"],
+          "text-font": fontLayer ? fontLayer.layout["text-font"] : ["Amazon Ember Regular"],
+          "text-size": 12
+        }
+      });
+
+      // click a cluster -> zoom into it
+      map.on("click", "clusters", async (e) => {
+        const f = map.queryRenderedFeatures(e.point, { layers: ["clusters"] })[0];
+        const zoom = await map.getSource("places").getClusterExpansionZoom(f.properties.cluster_id);
+        map.easeTo({ center: f.geometry.coordinates, zoom: zoom });
+      });
+
+      // click a dot -> popup with name and type
+      map.on("click", "places-dots", (e) => {
+        const f = e.features[0];
+        const box = document.createElement("div");
+        const title = document.createElement("b");
+        title.textContent = f.properties.name;
+        box.append(title, document.createElement("br"), f.properties.type);
+        new maplibregl.Popup().setLngLat(f.geometry.coordinates).setDOMContent(box).addTo(map);
+      });
+
+      // Step 5: click on empty map -> find nearest hospitals
+      map.on("click", (e) => {
+        const hit = map.queryRenderedFeatures(e.point, { layers: ["clusters", "places-dots"] });
+        if (hit.length > 0) return;       // the click was on a dot or cluster, handled above
+        findNearest(e.lngLat);
+      });
+
+      ["clusters", "places-dots"].forEach(id => {
+        map.on("mouseenter", id, () => map.getCanvas().style.cursor = "pointer");
+        map.on("mouseleave", id, () => map.getCanvas().style.cursor = "");
+      });
+
+      // ---- Step 4: filter panel ----
+      buildPanel();
+      applyFilters();
+    });
+  </script>
+</body>
+</html>
