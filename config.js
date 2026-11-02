@@ -1,0 +1,3 @@
+// Your Amazon Location API key. Keep this file OUT of GitHub (we'll add it to .gitignore).
+const API_KEY = "v1.public.eyJqdGkiOiIzMDY2ZTg0Mi0xNmYxLTRkOTctOTdmNy0yYWE1MDZmZGFiZjcifTIzZY-yFs4Cq9JqOGfxYTEAOJ4WMk5GHSZChaSlp-M5Ni4YSboZXEuQI9YrQ3Lgj1Gxohais5cIgVbc7ilR2lAFqQDfLddD2QHMWN3-A1A-Nkfy66LPu9ElZJHlUM_WmliBgH-DuVkis4qgXVPE3_b4Q4iIescWhk505XFnm4T5mzurylDzgae6LSr2qEHnhUJg-h5AVpXik0iSsYee3ZxtBPS3Xf8wpuQO8d6jPxSTHglImHJ7ZYtIq7-mGj7r_6NwiL-UBx-oPGIMPUVEDDMwR_kgNJMlh_5jUfw-lcwrxtsj-KL-GFiQ-VZ0x1fQ2IQXLmNYVo9dGBq2RKo1CkI.ZWU0ZWIzMTktMWRhNi00Mzg0LTllMzYtNzlmMDU3MjRmYTkx";
+const REGION = "us-east-1";
