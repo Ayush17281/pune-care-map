@@ -4,7 +4,7 @@ An interactive map of **5,703 health places in Pune** (hospitals, pharmacies, de
 
 Built for the AWS Weekend Challenge: **Map it**.
 
-- **Live map:** [ADD LIVE LINK HERE]
+- **Live map:** https://ayush17281.github.io/pune-care-map/
 - **Demo video (under 3 min):** [ADD VIDEO LINK HERE]
 
 ## What you can do on the map
