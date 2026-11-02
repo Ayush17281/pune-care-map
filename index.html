@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.x/dist/maplibre-gl.css" />
   <script src="https://unpkg.com/maplibre-gl@5.x/dist/maplibre-gl.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
-  <!-- config.js holds API_KEY and REGION (kept out of this file on purpose) -->
+  <!-- config.js holds API_KEY and REGION -->
   <script src="config.js"></script>
   <style>
     body { margin: 0; font-family: system-ui, Segoe UI, Arial, sans-serif; }
@@ -43,15 +43,15 @@
     <div id="count">Loading places...</div>
     <button id="reset" class="linkbtn" type="button">Reset filters</button>
     <hr>
-<div id="hint">
-  <b>Find the nearest:</b> <select id="findType"></select><br>
-  Then click anywhere on the map to get the 3 nearest by road.
-</div>
+    <div id="hint">
+      <b>Find the nearest:</b> <select id="findType"></select><br>
+      Then click anywhere on the map to get the 3 nearest by road.
+    </div>
     <div id="results"></div>
   </div>
 
   <script>
-    // One place for the type -> colour rules. Used by the dots AND the filter panel.
+    // One place for the type -> colour rules. Used by the dots, the filter panel and the dropdown.
     const TYPE_COLORS = {
       "Hospital": "#d62728",
       "Pharmacy": "#2ca02c",
@@ -79,20 +79,24 @@
     const activeTypes = new Set(Object.keys(TYPE_COLORS));
     let searchText = "";
     let youMarker = null;
+    let destMarkers = [];
     let busy = false;
 
     const searchEl = document.getElementById("search");
     const typesEl = document.getElementById("types");
     const countEl = document.getElementById("count");
     const resultsEl = document.getElementById("results");
-const findTypeEl = document.getElementById("findType");
-Object.keys(TYPE_COLORS).forEach(t => {
-  const o = document.createElement("option");
-  o.value = t; o.textContent = t;
-  findTypeEl.appendChild(o);
-});
-findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clearRoutes(); });
-    // ================= Step 4: filters + search =================
+    const findTypeEl = document.getElementById("findType");
+
+    // Fill the "Find the nearest" dropdown from the same type list
+    Object.keys(TYPE_COLORS).forEach(t => {
+      const o = document.createElement("option");
+      o.value = t; o.textContent = t;
+      findTypeEl.appendChild(o);
+    });
+    findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clearRoutes(); });
+
+    // ================= filters + search =================
     // We update the SOURCE data (not just a layer filter) because clusters are counted from the source.
     function applyFilters() {
       const q = searchText.trim().toLowerCase();
@@ -156,7 +160,7 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
       applyFilters();
     });
 
-    // ================= Step 5: nearest hospitals by road (AWS Routes) =================
+    // ================= nearest places by road (AWS Routes) =================
     // Straight-line distance in metres between two [lon, lat] points (haversine formula).
     function haversine(a, b) {
       const R = 6371000, rad = Math.PI / 180;
@@ -190,10 +194,13 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
 
     function fmtDistance(m) { return m < 1000 ? Math.round(m) + " m" : (m / 1000).toFixed(1) + " km"; }
     function fmtTime(s) { return s == null ? "" : Math.max(1, Math.round(s / 60)) + " min"; }
+    function shortName(n) { return n.length > 60 ? n.slice(0, 57) + "..." : n; }
 
     function clearRoutes() {
       map.getSource("routes").setData({ type: "FeatureCollection", features: [] });
       if (youMarker) { youMarker.remove(); youMarker = null; }
+      destMarkers.forEach(m => m.remove());
+      destMarkers = [];
       resultsEl.replaceChildren();
     }
 
@@ -206,12 +213,13 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
         youMarker = new maplibregl.Marker({ color: "#0b5ed7" }).setLngLat(here).addTo(map);
         resultsEl.textContent = `Finding the nearest ${findTypeEl.value}...`;
 
-        // 1) cheap step on your laptop: pick the 3 closest hospitals in a straight line
+        // 1) cheap step in the browser: pick the 5 closest in a straight line
+        //    (5, not 3, because the closest by road is not always the closest in a straight line)
         const nearest = allFeatures
           .filter(f => f.properties.type === findTypeEl.value)
           .map(f => ({ f, straight: haversine(here, f.geometry.coordinates) }))
           .sort((a, b) => a.straight - b.straight)
-          .slice(0, 3);
+          .slice(0, 5);
 
         // 2) AWS step: get the real driving route to each of them
         const items = await Promise.all(nearest.map(async (n) => {
@@ -229,7 +237,9 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
           }
         }));
 
+        // 3) keep the best 3 by real road distance
         items.sort((a, b) => a.meters - b.meters);
+        items.length = Math.min(items.length, 3);
         items.forEach((it, i) => { it.rank = i + 1; });
 
         // draw the route lines
@@ -240,6 +250,14 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
             properties: { rank: it.rank },
             geometry: { type: "LineString", coordinates: it.line }
           }))
+        });
+
+        // numbered markers at the end of each route
+        items.forEach(it => {
+          const el = document.createElement("div");
+          el.textContent = it.rank;
+          el.style.cssText = "background:#0b5ed7;color:#fff;width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)";
+          destMarkers.push(new maplibregl.Marker({ element: el }).setLngLat(it.dest).addTo(map));
         });
 
         showResults(items, here);
@@ -260,7 +278,7 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
 
         const nm = document.createElement("div");
         nm.className = "nm";
-        nm.textContent = `${it.rank}. ${it.name}`;      // textContent: names are never treated as HTML
+        nm.textContent = `${it.rank}. ${shortName(it.name)}`;   // textContent: names are never treated as HTML
 
         const meta = document.createElement("div");
         meta.className = "meta";
@@ -288,7 +306,7 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
 
     // ================= map setup =================
     map.on("load", async () => {
-      // ---- Step 1: load the CSV and turn each row into a GeoJSON point ----
+      // load the CSV and turn each row into a GeoJSON point
       const response = await fetch("pune_health_clean.csv");
       const text = await response.text();
       const rows = Papa.parse(text, { header: true, skipEmptyLines: true }).data;
@@ -300,14 +318,14 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
       }));
       console.log("places loaded:", allFeatures.length);
 
-      // ---- Step 2: source (the data) ----
+      // source (the data), with clustering
       map.addSource("places", {
         type: "geojson",
         data: { type: "FeatureCollection", features: allFeatures },
         cluster: true, clusterMaxZoom: 14, clusterRadius: 55
       });
 
-      // ---- Step 2: single dots, coloured by type ----
+      // single dots, coloured by type
       map.addLayer({
         id: "places-dots",
         type: "circle",
@@ -321,7 +339,7 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
         }
       });
 
-      // ---- Step 5: route lines (drawn UNDER the dots so dots stay clickable) ----
+      // route lines (drawn UNDER the dots so dots stay clickable)
       map.addSource("routes", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addLayer({
         id: "route-lines",
@@ -334,7 +352,7 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
         }
       }, "places-dots");
 
-      // ---- Step 3: cluster circles ----
+      // cluster circles
       map.addLayer({
         id: "clusters",
         type: "circle",
@@ -348,6 +366,7 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
         }
       });
 
+      // numbers inside the clusters (reuse a font the base map already uses)
       const fontLayer = map.getStyle().layers.find(l =>
         l.layout && Array.isArray(l.layout["text-font"]) &&
         typeof l.layout["text-font"][0] === "string" && l.layout["text-font"][0] !== "literal");
@@ -381,7 +400,7 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
         new maplibregl.Popup().setLngLat(f.geometry.coordinates).setDOMContent(box).addTo(map);
       });
 
-      // Step 5: click on empty map -> find nearest hospitals
+      // click on empty map -> find the nearest places of the chosen type
       map.on("click", (e) => {
         const hit = map.queryRenderedFeatures(e.point, { layers: ["clusters", "places-dots"] });
         if (hit.length > 0) return;       // the click was on a dot or cluster, handled above
@@ -393,7 +412,7 @@ findTypeEl.addEventListener("change", () => { if (map.getSource("routes")) clear
         map.on("mouseleave", id, () => map.getCanvas().style.cursor = "");
       });
 
-      // ---- Step 4: filter panel ----
+      // filter panel
       buildPanel();
       applyFilters();
     });
